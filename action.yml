@@ -107,7 +107,7 @@ runs:
         URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${ORG_ID}/projects/${PROJ_ID}/buildtargets/${TARGET_ID}/builds"
 
         # Trigger the build
-        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
+        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o response.json \
         -X POST \
         -H "${AUTH_HEADER}" \
         -H "Content-Type: application/json" \
@@ -115,11 +115,11 @@ runs:
         -d "$PAYLOAD")
 
         if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
-          BUILD_ID=$(jq -r '.build' /tmp/response.json)
+          BUILD_ID=$(jq -r '.build' response.json)
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
         else
-          ERROR_MSG=$(jq -r '.error' /tmp/response.json)
+          ERROR_MSG=$(jq -r '.error' response.json)
           echo "::error ::Failed to trigger build: HTTP $RESPONSE_CODE – $ERROR_MSG"
           exit 1
         fi
