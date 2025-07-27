@@ -68,9 +68,27 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install -y curl jq
+    - name: Clean inputs (remove newlines)
+      shell: bash
+      run: |
+        # Remove CR/LF from inputs and secrets
+        AUTH_HEADER_CLEAN=$(printf '%s' "${{ inputs.authorization_header }}" | tr -d '\r\n')
+        ORG_ID_CLEAN=$(printf '%s' "${{ inputs.unity_org_id }}" | tr -d '\r\n')
+        PROJ_ID_CLEAN=$(printf '%s' "${{ inputs.unity_project_id }}" | tr -d '\r\n')
+        TARGET_ID_CLEAN=$(printf '%s' "${{ inputs.build_target_id }}" | tr -d '\r\n')
+        # Export cleaned values
+        echo "AUTH_HEADER=$AUTH_HEADER_CLEAN" >> $GITHUB_ENV
+        echo "ORG_ID=$ORG_ID_CLEAN"         >> $GITHUB_ENV
+        echo "PROJ_ID=$PROJ_ID_CLEAN"       >> $GITHUB_ENV
+        echo "TARGET_ID=$TARGET_ID_CLEAN"   >> $GITHUB_ENV
 
     - name: Trigger Unity Cloud Build
       shell: bash
+      env:
+        AUTH_HEADER: ${{ env.AUTH_HEADER }}
+        ORG_ID: ${{ env.ORG_ID }}
+        PROJ_ID: ${{ env.PROJ_ID }}
+        TARGET_ID: ${{ env.TARGET_ID }}
       run: |
         # Determine clean flag as JSON boolean
         if [ "${{ inputs.clean }}" = "true" ]; then
@@ -86,10 +104,15 @@ runs:
           '{ clean: $clean, delay: 0, commit: $commit }')
 
         # Build URL into a single variable to avoid line-break issues
-        URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${{ inputs.unity_org_id }}/projects/${{ inputs.unity_project_id }}/buildtargets/${{ inputs.build_target_id }}/builds"
+        URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${ORG_ID}/projects/${PROJ_ID}/buildtargets/${TARGET_ID}/builds"
 
         # Trigger the build
-        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST -H "${{ inputs.authorization_header }}" -H "Content-Type: application/json" "$URL" -d "$PAYLOAD")
+        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
+        -X POST \
+        -H "${AUTH_HEADER}" \
+        -H "Content-Type: application/json" \
+        "$URL" \
+        -d "$PAYLOAD")
 
         if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
           BUILD_ID=$(jq -r '.build' /tmp/response.json)
