@@ -1,0 +1,85 @@
+name: 'Unity Cloud Build Trigger'
+description: 'Trigger a Unity Cloud Build for a given commit or branch.'
+inputs:
+  unity_org_id:
+    description: 'Your Unity Organization ID'
+    required: true
+  unity_project_id:
+    description: 'Your Unity Project ID'
+    required: true
+  build_target_id:
+    description: 'Your Build Target ID'
+    required: true
+  authorization_header:
+    description: 'Authorization header for Unity Cloud Build API (e.g. "Authorization: Basic ...")'
+    required: true
+  commit_sha:
+    description: 'Commit SHA to build. If empty, will be auto-detected from the context.'
+    required: false
+  branch:
+    description: 'Git branch to build (optional). If provided, will fetch latest SHA from this branch.'
+    required: false
+  clean:
+    description: 'Whether to perform a clean build (true/false)'
+    required: false
+    default: 'false'
+  platform:
+    description: 'Build platform (e.g. standalonewindows64)'
+    required: false
+    default: 'standalonewindows64'
+  machine_type_label:
+    description: 'Machine type label for build (e.g. win_premium_v1)'
+    required: false
+    default: 'win_premium_v1'
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Determine commit SHA
+      shell: bash
+      run: |
+        # If branch input is provided, fetch its latest SHA
+        if [[ -n "${{ inputs.branch }}" ]]; then
+          git fetch origin "${{ inputs.branch }}"
+          COMMIT_SHA=$(git rev-parse origin/"${{ inputs.branch }}")
+        elif [[ -n "${{ inputs.commit_sha }}" ]]; then
+          COMMIT_SHA="${{ inputs.commit_sha }}"
+        else
+          # default: use HEAD of current checkout
+          COMMIT_SHA=$(git rev-parse HEAD)
+        fi
+        echo "commit=$COMMIT_SHA" >> $GITHUB_OUTPUT
+
+    - name: Install dependencies (`curl` / `jq`)
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl jq
+
+    - name: Trigger Unity Cloud Build
+      shell: bash
+      run: |
+        PAYLOAD=$(jq -n \
+          --arg commit "${{ steps.determine-commit.outputs.commit }}" \
+          --argjson clean (${{ inputs.clean == 'true' }}) \
+          '{ clean: $clean, delay: 0, commit: $commit }')
+
+        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
+          -X POST \
+          -H "${{ inputs.authorization_header }}" \
+          -H "Content-Type: application/json" \
+          "https://build-api.cloud.unity3d.com/api/v1/orgs/${{ inputs.unity_org_id }}/projects/${{ inputs.unity_project_id }}/buildtargets/${{ inputs.build_target_id }}/builds" \
+          -d "$PAYLOAD")
+
+        if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
+          BUILD_ID=$(jq -r '.build' /tmp/response.json)
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
+        else
+          ERROR_MSG=$(jq -r '.error' /tmp/response.json)
+          echo "::error ::Failed to trigger build: HTTP $RESPONSE_CODE – $ERROR_MSG"
+          exit 1
+        fi
+      # NOTE: you can reference outputs.build_id in the calling workflow
