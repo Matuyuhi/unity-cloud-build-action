@@ -85,12 +85,11 @@ runs:
           --argjson clean "$CLEAN_FLAG" \
           '{ clean: $clean, delay: 0, commit: $commit }')
 
-        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
-          -X POST \
-          -H "${{ inputs.authorization_header }}" \
-          -H "Content-Type: application/json" \
-          "https://build-api.cloud.unity3d.com/api/v1/orgs/${{ inputs.unity_org_id }}/projects/${{ inputs.unity_project_id }}/buildtargets/${{ inputs.build_target_id }}/builds" \
-          -d "$PAYLOAD")
+        # Build URL into a single variable to avoid line-break issues
+        URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${{ inputs.unity_org_id }}/projects/${{ inputs.unity_project_id }}/buildtargets/${{ inputs.build_target_id }}/builds"
+
+        # Trigger the build
+        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json -X POST -H "${{ inputs.authorization_header }}" -H "Content-Type: application/json" "$URL" -d "$PAYLOAD")
 
         if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
           BUILD_ID=$(jq -r '.build' /tmp/response.json)
