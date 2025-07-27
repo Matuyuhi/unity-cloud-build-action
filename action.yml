@@ -1,5 +1,9 @@
 name: 'Unity Cloud Build Trigger'
 description: 'Trigger a Unity Cloud Build for a given commit or branch.'
+author: 'matuyuhi'
+branding:
+  icon: 'upload-cloud'
+  color: 'green'
 inputs:
   unity_org_id:
     description: 'Your Unity Organization ID'
@@ -31,6 +35,13 @@ inputs:
     description: 'Machine type label for build (e.g. win_premium_v1)'
     required: false
     default: 'win_premium_v1'
+outputs:
+  build_id:
+    description: 'The ID of the triggered build.'
+    value: '${{ steps.trigger-build.outputs.build_id }}'
+  commit:
+    description: 'The commit SHA that was built.'
+    value: '${{ steps.determine-commit.outputs.commit }}'
 runs:
   using: 'composite'
   steps:
