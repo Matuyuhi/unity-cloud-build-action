@@ -72,9 +72,17 @@ runs:
     - name: Trigger Unity Cloud Build
       shell: bash
       run: |
+        # Determine clean flag as JSON boolean
+        if [ "${{ inputs.clean }}" = "true" ]; then
+          CLEAN_FLAG=true
+        else
+          CLEAN_FLAG=false
+        fi
+
+        # Prepare JSON payload
         PAYLOAD=$(jq -n \
           --arg commit "${{ steps.determine-commit.outputs.commit }}" \
-          --argjson clean (${{ inputs.clean == 'true' }}) \
+          --argjson clean "$CLEAN_FLAG" \
           '{ clean: $clean, delay: 0, commit: $commit }')
 
         RESPONSE_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
