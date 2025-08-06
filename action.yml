@@ -115,7 +115,8 @@ runs:
         -d "$PAYLOAD")
 
         if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
-          BUILD_ID=$(jq -r '.build' response.json)
+          echo "response::$(cat response.json)"
+          BUILD_ID=$(jq -r '.groupBuildId' response.json)
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
         else
