@@ -116,7 +116,7 @@ runs:
 
         if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
           echo "response::$(cat response.json)"
-          BUILD_ID=$(jq -r '.groupBuildId' response.json)
+          BUILD_ID=$(jq -r '.[0].build' response.json)
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
           echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
         else
