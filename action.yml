@@ -49,6 +49,7 @@ runs:
       uses: actions/checkout@v4
 
     - name: Determine commit SHA
+      id: determine-commit
       shell: bash
       run: |
         # If branch input is provided, fetch its latest SHA
@@ -83,6 +84,7 @@ runs:
         echo "TARGET_ID=$TARGET_ID_CLEAN"   >> $GITHUB_ENV
 
     - name: Trigger Unity Cloud Build
+      id: trigger-build
       shell: bash
       env:
         AUTH_HEADER: ${{ env.AUTH_HEADER }}
