@@ -20,8 +20,9 @@ A reusable GitHub Action that triggers a Unity Cloud Build for a specified commi
 ## Outputs
 
 | Output     | Description                                |
-| ---------- | ------------------------------------------ |
+|------------| ------------------------------------------ |
 | `build_id` | The ID of the triggered Unity Cloud Build. |
+| `platform` | The platform of the triggered build. |
 
 ## Usage
 
@@ -60,9 +61,6 @@ Trigger a build manually from the Actions tab, optionally specifying `commit_sha
 on:
   workflow_dispatch:
     inputs:
-      commit_sha:
-        description: 'Commit SHA to build (optional)'
-        required: false
       branch:
         description: 'Branch to build (optional)'
         required: false
@@ -79,7 +77,6 @@ jobs:
           unity_project_id: ${{ secrets.UNITY_PROJECT_ID }}
           build_target_id: ${{ secrets.UNITY_BUILD_TARGET_ID }}
           authorization_header: ${{ secrets.UNITY_AUTH_HEADER }}
-          commit_sha: ${{ github.event.inputs.commit_sha }}
           branch: ${{ github.event.inputs.branch }}
 ```
 

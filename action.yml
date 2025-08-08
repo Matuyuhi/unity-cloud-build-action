@@ -37,9 +37,9 @@ outputs:
   build_id:
     description: 'The ID of the triggered build.'
     value: '${{ steps.trigger-build.outputs.build_id }}'
-  commit:
-    description: 'The commit SHA that was built.'
-    value: '${{ steps.determine-commit.outputs.commit }}'
+  platform:
+    description: 'The platform of the build.'
+    value: '${{ steps.trigger-build.outputs.platform }}'
 runs:
   using: 'composite'
   steps:
@@ -102,9 +102,8 @@ runs:
           echo "response::$(cat response.json)"
           BUILD_ID=$(jq -r '.[0].build' response.json)
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-          BRANCH=$(jq -r '.[0].scmBranch' response.json)
-          COMMIT_SHA=$(git rev-parse "$BRANCH")
-          echo "commit=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          PLATFORM=$(jq -r '.[0].platform' response.json)
+          echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
           echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
         else
           ERROR_MSG=$(jq -r '.error' response.json)
