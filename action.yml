@@ -17,12 +17,10 @@ inputs:
   authorization_header:
     description: 'Authorization header for Unity Cloud Build API (e.g. "Authorization: Basic ...")'
     required: true
-  commit_sha:
-    description: 'Commit SHA to build. If empty, will be auto-detected from the context.'
-    required: false
   branch:
     description: 'Git branch to build (optional). If provided, will fetch latest SHA from this branch.'
     required: false
+    default: ''
   clean:
     description: 'Whether to perform a clean build (true/false)'
     required: false
@@ -47,22 +45,6 @@ runs:
   steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    - name: Determine commit SHA
-      id: determine-commit
-      shell: bash
-      run: |
-        # If branch input is provided, fetch its latest SHA
-        if [[ -n "${{ inputs.branch }}" ]]; then
-          git fetch origin "${{ inputs.branch }}"
-          COMMIT_SHA=$(git rev-parse origin/"${{ inputs.branch }}")
-        elif [[ -n "${{ inputs.commit_sha }}" ]]; then
-          COMMIT_SHA="${{ inputs.commit_sha }}"
-        else
-          # default: use HEAD of current checkout
-          COMMIT_SHA=$(git rev-parse HEAD)
-        fi
-        echo "commit=$COMMIT_SHA" >> $GITHUB_OUTPUT
 
     - name: Install dependencies (`curl` / `jq`)
       shell: bash
@@ -101,9 +83,9 @@ runs:
 
         # Prepare JSON payload
         PAYLOAD=$(jq -n \
-          --arg commit "${{ steps.determine-commit.outputs.commit }}" \
+          --arg branch "${{ inputs.branch }}" \
           --argjson clean "$CLEAN_FLAG" \
-          '{ clean: $clean, delay: 0, commit: $commit }')
+          '{ clean: $clean, delay: 0, branch: $branch }')
 
         # Build URL into a single variable to avoid line-break issues
         URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${ORG_ID}/projects/${PROJ_ID}/buildtargets/${TARGET_ID}/builds"
@@ -120,6 +102,9 @@ runs:
           echo "response::$(cat response.json)"
           BUILD_ID=$(jq -r '.[0].build' response.json)
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          BRANCH=$(jq -r '.[0].scmBranch' response.json)
+          COMMIT_SHA=$(git rev-parse "$BRANCH")
+          echo "commit=$COMMIT_SHA" >> $GITHUB_OUTPUT
           echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
         else
           ERROR_MSG=$(jq -r '.error' response.json)

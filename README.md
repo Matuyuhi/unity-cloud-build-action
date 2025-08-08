@@ -6,17 +6,16 @@ A reusable GitHub Action that triggers a Unity Cloud Build for a specified commi
 
 ## Inputs
 
-| Input                  | Required | Description                                                                                         | Default               |
-| ---------------------- | -------- | --------------------------------------------------------------------------------------------------- | --------------------- |
-| `unity_org_id`         | Yes      | The Unity Organization ID (used in the endpoint `orgs/{unity_org_id}`).                             | —                     |
-| `unity_project_id`     | Yes      | The Unity Cloud Build Project ID.                                                                   | —                     |
-| `build_target_id`      | Yes      | The Build Target ID within the Unity Cloud Build project.                                           | —                     |
-| `authorization_header` | Yes      | Authorization header for the Unity Cloud Build API (e.g., `Authorization: Basic ...`).              | —                     |
-| `commit_sha`           | No       | The commit SHA to build. If not provided, the action uses the `branch` input or the current `HEAD`. | (empty)               |
-| `branch`               | No       | The Git branch to build. If provided, the latest commit SHA from this branch will be fetched.       | (empty)               |
-| `clean`                | No       | Whether to perform a clean build (`true` or `false`).                                               | `false`               |
+| Input                  | Required | Description                                                                                         | Default              |
+| ---------------------- | -------- | --------------------------------------------------------------------------------------------------- | -------------------- |
+| `unity_org_id`         | Yes      | The Unity Organization ID (used in the endpoint `orgs/{unity_org_id}`).                             | —                    |
+| `unity_project_id`     | Yes      | The Unity Cloud Build Project ID.                                                                   | —                    |
+| `build_target_id`      | Yes      | The Build Target ID within the Unity Cloud Build project.                                           | —                    |
+| `authorization_header` | Yes      | Authorization header for the Unity Cloud Build API (e.g., `Authorization: Basic ...`).              | —                    |
+| `branch`               | No       | The Git branch to build. If provided, the latest commit SHA from this branch will be fetched.       | `''`             |
+| `clean`                | No       | Whether to perform a clean build (`true` or `false`).                                               | `false`              |
 | `platform`             | No       | The build platform (e.g., `standalonewindows64`).                                                   | `standalonewindows64` |
-| `machine_type_label`   | No       | Machine type label for the build machine (e.g., `win_premium_v1`).                                  | `win_premium_v1`      |
+| `machine_type_label`   | No       | Machine type label for the build machine (e.g., `win_premium_v1`).                                  | `win_premium_v1`     |
 
 ## Outputs
 
