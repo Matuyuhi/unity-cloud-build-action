@@ -190,6 +190,11 @@ machine. The queue state the build was stuck in is then the only clue, which is
 why `wait_for_completion` logs it on every change — `queued (waitingForBuildAgent)`
 and `queued (targetConcurrency)` point at different problems.
 
+When a waited-on build ends up canceled, the action fetches the build's own
+audit log (from the `links.auditlog` URL in the API response, and only if it
+points at the configured API host) and prints its entries — that is where Unity
+records what acted on the build.
+
 What to look at, in order: whether another build was created for the same build
 target while this one waited, whether the organization still has build minutes,
 and whether the requested `machine_type_label` is one the plan can actually
