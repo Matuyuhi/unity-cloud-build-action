@@ -14,12 +14,29 @@ inputs:
   build_target_id:
     description: 'Your Build Target ID'
     required: true
+  unity_service_account_key_id:
+    description: >-
+      Key ID of a Unity service account with a Build Automation role. Combined
+      with `unity_service_account_secret_key` into the HTTP Basic credential
+      required by API v2. Required unless `authorization_header` is supplied.
+    required: false
+    default: ''
+  unity_service_account_secret_key:
+    description: >-
+      Secret key of the Unity service account. Pass this as a secret; it is
+      masked in the logs.
+    required: false
+    default: ''
   authorization_header:
     description: >-
-      Authorization header for the Unity Cloud Build API, e.g.
-      "Authorization: Basic <token>". A bare token is also accepted and gets the
-      "Authorization: " prefix added automatically.
-    required: true
+      Pre-built Authorization header, e.g. "Authorization: Basic <token>". A
+      bare token is also accepted and gets the "Authorization: " prefix added
+      automatically. Use this only if you cannot pass the service account key
+      and secret separately; it is mutually exclusive with them. Note that API
+      v2 rejects the legacy Build Automation API key — the token must be
+      base64("<keyId>:<secretKey>") of a service account.
+    required: false
+    default: ''
   branch:
     description: >-
       Git branch to build. When empty, the branch configured on the build target
@@ -46,10 +63,11 @@ inputs:
   api_url:
     description: >-
       Base URL of the Unity Build Automation API, including the version segment.
-      Override this to move to a newer API version (e.g. ".../api/v2") without
-      changing the action.
+      Defaults to API v2. The v1 base URL
+      (https://build-api.cloud.unity3d.com/api/v1) still works until Unity
+      removes it on 2026-12-21, but the action warns when it is used.
     required: false
-    default: 'https://build-api.cloud.unity3d.com/api/v1'
+    default: 'https://build-automation.services.api.unity.com/v2'
 outputs:
   build_id:
     description: 'The ID (build number) of the triggered build.'
@@ -57,6 +75,11 @@ outputs:
   platform:
     description: 'The platform of the build, as reported by the API.'
     value: '${{ steps.trigger-build.outputs.platform }}'
+  build_status:
+    description: >-
+      The status the build was created with, as reported by the API (e.g.
+      queued). Empty if the API did not report one.
+    value: '${{ steps.trigger-build.outputs.build_status }}'
 runs:
   using: 'composite'
   steps:
@@ -112,6 +135,8 @@ runs:
       # executed as code.
       env:
         INPUT_AUTHORIZATION_HEADER: ${{ inputs.authorization_header }}
+        INPUT_KEY_ID: ${{ inputs.unity_service_account_key_id }}
+        INPUT_SECRET_KEY: ${{ inputs.unity_service_account_secret_key }}
         INPUT_UNITY_ORG_ID: ${{ inputs.unity_org_id }}
         INPUT_UNITY_PROJECT_ID: ${{ inputs.unity_project_id }}
         INPUT_BUILD_TARGET_ID: ${{ inputs.build_target_id }}
@@ -128,7 +153,9 @@ runs:
           printf '%s' "${1:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
         }
 
-        AUTH_HEADER="$(trim "${INPUT_AUTHORIZATION_HEADER:-}")"
+        RAW_AUTH_HEADER="$(trim "${INPUT_AUTHORIZATION_HEADER:-}")"
+        KEY_ID="$(trim "${INPUT_KEY_ID:-}")"
+        SECRET_KEY="$(trim "${INPUT_SECRET_KEY:-}")"
         ORG_ID="$(trim "${INPUT_UNITY_ORG_ID:-}")"
         PROJ_ID="$(trim "${INPUT_UNITY_PROJECT_ID:-}")"
         TARGET_ID="$(trim "${INPUT_BUILD_TARGET_ID:-}")"
@@ -138,17 +165,18 @@ runs:
         API_URL="$(trim "${INPUT_API_URL:-}")"
         API_URL="${API_URL%/}"
 
-        # Keep the credential out of the logs even if it was not passed as a secret.
-        if [ -n "$AUTH_HEADER" ]; then
-          echo "::add-mask::${AUTH_HEADER}"
-        fi
+        # Keep credentials out of the logs even if they were not passed as secrets.
+        for secret in "$RAW_AUTH_HEADER" "$SECRET_KEY"; do
+          if [ -n "$secret" ]; then
+            echo "::add-mask::${secret}"
+          fi
+        done
 
         # Fail fast on missing required inputs instead of sending a doomed request.
         for pair in \
           "unity_org_id:${ORG_ID}" \
           "unity_project_id:${PROJ_ID}" \
           "build_target_id:${TARGET_ID}" \
-          "authorization_header:${AUTH_HEADER}" \
           "api_url:${API_URL}"
         do
           name="${pair%%:*}"
@@ -159,13 +187,44 @@ runs:
           fi
         done
 
-        # Accept a bare credential as well as a full header line.
-        case "$AUTH_HEADER" in
-          *:*) ;;
-          *)
-            echo "::warning ::'authorization_header' has no header name; assuming 'Authorization: <value>'."
-            AUTH_HEADER="Authorization: ${AUTH_HEADER}"
-            echo "::add-mask::${AUTH_HEADER}"
+        # API v2 authenticates with HTTP Basic using a service account key ID and
+        # secret. `authorization_header` remains supported for callers that can
+        # only supply a pre-built header, but the two are mutually exclusive so a
+        # half-finished migration fails loudly instead of using stale credentials.
+        if [ -n "$KEY_ID" ] || [ -n "$SECRET_KEY" ]; then
+          if [ -n "$RAW_AUTH_HEADER" ]; then
+            echo "::error ::Provide either 'unity_service_account_key_id'/'unity_service_account_secret_key' or 'authorization_header', not both."
+            exit 1
+          fi
+          if [ -z "$KEY_ID" ] || [ -z "$SECRET_KEY" ]; then
+            echo "::error ::'unity_service_account_key_id' and 'unity_service_account_secret_key' must be set together."
+            exit 1
+          fi
+          # `base64` wraps long lines on GNU coreutils, so strip the newlines.
+          BASIC_CREDENTIAL="$(printf '%s:%s' "$KEY_ID" "$SECRET_KEY" | base64 | tr -d '\r\n')"
+          echo "::add-mask::${BASIC_CREDENTIAL}"
+          AUTH_HEADER="Authorization: Basic ${BASIC_CREDENTIAL}"
+        elif [ -n "$RAW_AUTH_HEADER" ]; then
+          AUTH_HEADER="$RAW_AUTH_HEADER"
+          # Accept a bare credential as well as a full header line.
+          case "$AUTH_HEADER" in
+            *:*) ;;
+            *)
+              echo "::warning ::'authorization_header' has no header name; assuming 'Authorization: <value>'."
+              AUTH_HEADER="Authorization: ${AUTH_HEADER}"
+              ;;
+          esac
+        else
+          echo "::error ::No credentials supplied. Set 'unity_service_account_key_id' and 'unity_service_account_secret_key' (recommended), or 'authorization_header'."
+          exit 1
+        fi
+        echo "::add-mask::${AUTH_HEADER}"
+
+        # Unity removes API v1 on 2026-12-21; warn rather than fail so existing
+        # workflows keep running until then.
+        case "$API_URL" in
+          *build-api.cloud.unity3d.com*)
+            echo "::warning ::'api_url' points at Unity Build Automation API v1, which Unity removes on 2026-12-21. Drop the 'api_url' override to use v2 (https://build-automation.services.api.unity.com/v2) and switch to service account credentials."
             ;;
         esac
 
@@ -222,13 +281,13 @@ runs:
             break
           fi
           if [ "$attempt" -lt 3 ]; then
-            echo "::warning ::Could not connect to the Unity Cloud Build API (curl exit ${CURL_RC}); retrying (attempt ${attempt}/3)."
+            echo "::warning ::Could not connect to the Unity Build Automation API (curl exit ${CURL_RC}); retrying (attempt ${attempt}/3)."
             sleep $((attempt * 2))
           fi
         done
 
         if [ "$CURL_RC" -ne 0 ]; then
-          echo "::error ::Request to the Unity Cloud Build API failed (curl exit ${CURL_RC}). No build was triggered."
+          echo "::error ::Request to the Unity Build Automation API failed (curl exit ${CURL_RC}). No build was triggered."
           exit 1
         fi
 
@@ -236,34 +295,55 @@ runs:
           echo "::debug ::HTTP ${HTTP_CODE} $(tr -d '\r\n' < "$RESPONSE_FILE")"
         fi
 
-        # The API returns a single-element array; tolerate a bare object too.
+        # A successful trigger returns a single-element array (HTTP 202 on v2);
+        # tolerate a bare object too. Errors are bare objects on both versions.
         FIRST_ENTRY='if type == "array" then (.[0] // {}) else . end'
 
         if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
-          ERROR_MSG="$(jq -r "${FIRST_ENTRY} | (.error // .message // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+          # v2 reports errors in the RFC 7807 shape (detail/title/requestId); v1
+          # used error/message. Read whichever the response carries.
+          ERROR_MSG="$(jq -r "${FIRST_ENTRY} | (.detail // .error // .message // .title // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+          REQUEST_ID="$(jq -r "${FIRST_ENTRY} | (.requestId // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
           if [ -z "$ERROR_MSG" ]; then
             # Not JSON (or no message field) — fall back to a truncated raw body.
             ERROR_MSG="$(head -c 500 "$RESPONSE_FILE" | tr -d '\r\n')"
           fi
-          echo "::error ::Failed to trigger build: HTTP ${HTTP_CODE} – ${ERROR_MSG:-<empty response>}"
+          if [ -n "$REQUEST_ID" ]; then
+            # Unity support asks for this when investigating a failed request.
+            ERROR_MSG="${ERROR_MSG} (requestId: ${REQUEST_ID})"
+          fi
+          if [ "$HTTP_CODE" = '401' ] || [ "$HTTP_CODE" = '403' ]; then
+            echo "::error ::Failed to trigger build: HTTP ${HTTP_CODE} – ${ERROR_MSG:-<empty response>}. API v2 requires a Unity service account key and secret with a Build Automation role; the legacy Build Automation API key is not accepted."
+          else
+            echo "::error ::Failed to trigger build: HTTP ${HTTP_CODE} – ${ERROR_MSG:-<empty response>}"
+          fi
           exit 1
         fi
 
         BUILD_ID="$(jq -r "${FIRST_ENTRY} | (.build // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
         PLATFORM_OUT="$(jq -r "${FIRST_ENTRY} | (.platform // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+        BUILD_STATUS="$(jq -r "${FIRST_ENTRY} | (.buildStatus // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
 
         if [ -z "$BUILD_ID" ]; then
-          echo "::error ::Unity Cloud Build returned HTTP ${HTTP_CODE} but no build ID: $(head -c 500 "$RESPONSE_FILE" | tr -d '\r\n')"
+          # A 2xx can still carry a per-target 'error' — e.g. a build for this
+          # target is already running — in which case no build was started.
+          ENTRY_ERROR="$(jq -r "${FIRST_ENTRY} | (.error // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+          if [ -n "$ENTRY_ERROR" ]; then
+            echo "::error ::Unity Build Automation did not start a build: ${ENTRY_ERROR}"
+          else
+            echo "::error ::Unity Build Automation returned HTTP ${HTTP_CODE} but no build ID: $(head -c 500 "$RESPONSE_FILE" | tr -d '\r\n')"
+          fi
           exit 1
         fi
 
         {
           echo "build_id=${BUILD_ID}"
           echo "platform=${PLATFORM_OUT}"
+          echo "build_status=${BUILD_STATUS}"
         } >> "$GITHUB_OUTPUT"
 
         {
-          echo "### Unity Cloud Build triggered"
+          echo "### Unity Build Automation build triggered"
           echo ""
           echo "| Field | Value |"
           echo "| --- | --- |"
@@ -271,6 +351,7 @@ runs:
           echo "| Build target | \`${TARGET_ID}\` |"
           echo "| Branch | \`${BRANCH:-<build target default>}\` |"
           echo "| Platform | \`${PLATFORM_OUT:-unknown}\` |"
+          echo "| Status | \`${BUILD_STATUS:-unknown}\` |"
           echo "| Clean | \`${CLEAN_FLAG}\` |"
         } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
