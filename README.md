@@ -6,7 +6,7 @@ A reusable GitHub Action that triggers a [Unity Build Automation](https://docs.u
 
 The action does not check out or read your repository — it only calls the Unity Build Automation REST API — so it is safe to run before, after, or without `actions/checkout`.
 
-It targets **API v2** by default. Unity removes API v1 on **2026-12-21**; see [Migrating from API v1](#migrating-from-api-v1) if you are upgrading from an earlier release of this action.
+It speaks **API v2**. Unity removes API v1 on **2026-12-21**; if you are upgrading from an earlier release of this action, see [Migrating from API v1](#migrating-from-api-v1) — the credentials change.
 
 ## Authentication
 
@@ -25,16 +25,13 @@ Pass them as `unity_service_account_key_id` and `unity_service_account_secret_ke
 | `unity_org_id`                     | Yes      | The Unity Organization ID (used in the endpoint `orgs/{unity_org_id}`).                                                                         | —                                                        |
 | `unity_project_id`                 | Yes      | The Unity Build Automation Project ID.                                                                                                          | —                                                        |
 | `build_target_id`                  | Yes      | The Build Target ID within the Unity Build Automation project.                                                                                  | —                                                        |
-| `unity_service_account_key_id`     | Yes\*    | Key ID of a Unity service account with a Build Automation role.                                                                                 | `''`                                                     |
-| `unity_service_account_secret_key` | Yes\*    | Secret key of that service account. Pass as a secret.                                                                                            | `''`                                                     |
-| `authorization_header`             | No\*     | Pre-built header, e.g. `Authorization: Basic <base64(keyId:secretKey)>`. A bare token also works and gets the `Authorization: ` prefix added.     | `''`                                                     |
+| `unity_service_account_key_id`     | Yes      | Key ID of a Unity service account with a Build Automation role.                                                                                 | —                                                        |
+| `unity_service_account_secret_key` | Yes      | Secret key of that service account. Pass as a secret.                                                                                            | —                                                        |
 | `branch`                           | No       | Git branch to build. When empty, the branch configured on the build target is used.                                                             | `''`                                                     |
 | `clean`                            | No       | Whether to perform a clean build. Accepts `true`/`false` (also `1`/`0`, `yes`/`no`, any casing).                                                | `false`                                                  |
 | `platform`                         | No       | Build platform override (e.g. `standalonewindows64`). Sent only when set.                                                                       | `''`                                                     |
 | `machine_type_label`               | No       | Machine type label (e.g. `win_premium_v1`). Sent as `machineTypeLabel`, only when set.                                                          | `''`                                                     |
-| `api_url`                          | No       | Base URL of the API, including the version segment.                                                                                             | `https://build-automation.services.api.unity.com/v2`     |
-
-\* Supply **either** the service account pair **or** `authorization_header` — not both. Providing both, or only one half of the pair, fails the step before any request is sent.
+| `api_url`                          | No       | Base URL of the API, including the version segment. v2 only — a v1 base URL is rejected.                                                         | `https://build-automation.services.api.unity.com/v2`     |
 
 `platform` and `machine_type_label` are omitted from the request when left empty, so the build target's own configuration applies. Set them only if you want to override the target.
 
@@ -124,7 +121,7 @@ jobs:
 
 ## Migrating from API v1
 
-Unity deprecated Build Automation API v1 and **removes it on 2026-12-21**. This action calls v2 by default. If you used an earlier release, two things change in your workflow:
+Unity deprecated Build Automation API v1 and **removes it on 2026-12-21**. This action calls v2 and no longer supports v1, so upgrading from an earlier release is a breaking change.
 
 | | v1 (before) | v2 (now) |
 | --- | --- | --- |
@@ -135,7 +132,9 @@ Unity deprecated Build Automation API v1 and **removes it on 2026-12-21**. This 
 
 The endpoint path (`/orgs/{org}/projects/{project}/buildtargets/{target}/builds`) and the request fields this action sends (`clean`, `delay`, `branch`, `platform`, `machineTypeLabel`) are unchanged.
 
-To migrate, replace the `authorization_header` input with the service account pair:
+### What you need to change
+
+The `authorization_header` input is **removed**. Create a [service account](#authentication) and replace it with the key pair:
 
 ```diff
 -          authorization_header: ${{ secrets.UNITY_AUTH_HEADER }}
@@ -143,20 +142,11 @@ To migrate, replace the `authorization_header` input with the service account pa
 +          unity_service_account_secret_key: ${{ secrets.UNITY_SA_SECRET_KEY }}
 ```
 
-Reusing your old API key will fail with `HTTP 401`/`403` — v2 only accepts service account credentials. A `403` with valid credentials usually means the service account has no Build Automation role on the project. The action calls both cases out explicitly in its error message and includes the API's `requestId`, which Unity support asks for.
+Your old API key cannot be reused in any form — v2 only accepts service account credentials. A `403` with otherwise valid credentials usually means the service account has no Build Automation role on the project. The action calls both cases out in its error message and includes the API's `requestId`, which Unity support asks for.
 
-### Staying on v1 temporarily
+Pointing `api_url` at a v1 URL fails immediately with a message telling you to pin an older release of this action, rather than sending a request that could only return `401`.
 
-Point `api_url` back at v1 until you have a service account in place. The action logs a deprecation warning when you do:
-
-```yaml
-        with:
-          api_url: https://build-api.cloud.unity3d.com/api/v1
-          authorization_header: ${{ secrets.UNITY_AUTH_HEADER }}
-          # ...
-```
-
-Both versions are parsed by the same code: the response parser accepts a single-element array (`[{ "build": 123, … }]`) or a bare object, and reads error text from `detail`, `error`, `message`, or `title`, whichever the response carries. If a response has no build ID, the action fails with the API's own explanation (e.g. a build is already running for that target) rather than silently reporting an empty one.
+If you are not ready to create a service account, stay on the previous release of this action until you are; v1 keeps working until Unity removes it.
 
 Reference: [Build Automation API v2](https://docs.unity.com/en-us/oas-build-automation-client/2.0.0) · [Unity's v1 → v2 migration guide](https://support.unity.com/hc/en-us/articles/51178448254356-How-do-I-migrate-my-Unity-Build-Automation-UBA-REST-API-calls-from-V1-to-V2)
 
@@ -165,7 +155,8 @@ Reference: [Build Automation API v2](https://docs.unity.com/en-us/oas-build-auto
 - **Non-idempotent by design.** Triggering a build is not idempotent, so a request that reached Unity is never retried. Only DNS and connection failures — where nothing reached the server — are retried (up to 3 attempts). This avoids double-charging build minutes.
 - **Secrets stay in one step.** Credentials are passed to a single step's environment and masked in the logs — the secret key, the base64 credential derived from it, and the assembled header are all masked. Nothing is written to `$GITHUB_ENV`, so they do not leak into other steps of the calling job.
 - **The response body is not logged** by default. Re-run the workflow with debug logging enabled to see it.
-- **Required inputs are validated before the request** — an empty org/project/target ID, a missing or ambiguous credential, or an invalid `clean` value fails immediately instead of producing a confusing API error.
+- **Required inputs are validated before the request** — an empty org/project/target ID, a missing credential, or an invalid `clean` value fails immediately instead of producing a confusing API error.
+- **A 2xx without a build ID is still a failure.** v2 can return `202` carrying only an `error` — typically because a build is already running for that target. The action reports the API's own explanation instead of an empty `build_id`. The parser accepts both the documented single-element array and a bare object.
 - **`curl` and `jq`** are used, and are preinstalled on GitHub-hosted runners. On runners that lack them, the action installs them via `apt-get` or `brew`, and fails with a clear message if neither is available. `base64` (from coreutils) is also required and is present on any runner that has a shell.
 
 ## Development
