@@ -1,5 +1,5 @@
 name: 'Unity Cloud Build Trigger'
-description: 'Trigger a Unity Cloud Build for a given commit or branch.'
+description: 'Trigger a Unity Cloud Build for a given branch and return the build ID.'
 author: 'matuyuhi'
 branding:
   icon: 'upload-cloud'
@@ -15,10 +15,15 @@ inputs:
     description: 'Your Build Target ID'
     required: true
   authorization_header:
-    description: 'Authorization header for Unity Cloud Build API (e.g. "Authorization: Basic ...")'
+    description: >-
+      Authorization header for the Unity Cloud Build API, e.g.
+      "Authorization: Basic <token>". A bare token is also accepted and gets the
+      "Authorization: " prefix added automatically.
     required: true
   branch:
-    description: 'Git branch to build (optional). If provided, will fetch latest SHA from this branch.'
+    description: >-
+      Git branch to build. When empty, the branch configured on the build target
+      is used.
     required: false
     default: ''
   clean:
@@ -26,88 +31,247 @@ inputs:
     required: false
     default: 'false'
   platform:
-    description: 'Build platform (e.g. standalonewindows64)'
+    description: >-
+      Build platform override (e.g. standalonewindows64). Sent to the API only
+      when set; otherwise the build target default applies.
     required: false
-    default: 'standalonewindows64'
+    default: ''
   machine_type_label:
-    description: 'Machine type label for build (e.g. win_premium_v1)'
+    description: >-
+      Machine type label for the build machine (e.g. win_premium_v1). Sent to
+      the API as machineTypeLabel only when set; otherwise the build target
+      default applies.
     required: false
-    default: 'win_premium_v1'
+    default: ''
+  api_url:
+    description: >-
+      Base URL of the Unity Build Automation API, including the version segment.
+      Override this to move to a newer API version (e.g. ".../api/v2") without
+      changing the action.
+    required: false
+    default: 'https://build-api.cloud.unity3d.com/api/v1'
 outputs:
   build_id:
-    description: 'The ID of the triggered build.'
+    description: 'The ID (build number) of the triggered build.'
     value: '${{ steps.trigger-build.outputs.build_id }}'
   platform:
-    description: 'The platform of the build.'
+    description: 'The platform of the build, as reported by the API.'
     value: '${{ steps.trigger-build.outputs.platform }}'
 runs:
   using: 'composite'
   steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - name: Ensure `curl` and `jq` are available
+      shell: bash
+      run: |
+        set -euo pipefail
 
-    - name: Install dependencies (`curl` / `jq`)
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y curl jq
-    - name: Clean inputs (remove newlines)
-      shell: bash
-      run: |
-        # Remove CR/LF from inputs and secrets
-        AUTH_HEADER_CLEAN=$(printf '%s' "${{ inputs.authorization_header }}" | tr -d '\r\n')
-        ORG_ID_CLEAN=$(printf '%s' "${{ inputs.unity_org_id }}" | tr -d '\r\n')
-        PROJ_ID_CLEAN=$(printf '%s' "${{ inputs.unity_project_id }}" | tr -d '\r\n')
-        TARGET_ID_CLEAN=$(printf '%s' "${{ inputs.build_target_id }}" | tr -d '\r\n')
-        # Export cleaned values
-        echo "AUTH_HEADER=$AUTH_HEADER_CLEAN" >> $GITHUB_ENV
-        echo "ORG_ID=$ORG_ID_CLEAN"         >> $GITHUB_ENV
-        echo "PROJ_ID=$PROJ_ID_CLEAN"       >> $GITHUB_ENV
-        echo "TARGET_ID=$TARGET_ID_CLEAN"   >> $GITHUB_ENV
+        missing=()
+        for cmd in curl jq; do
+          command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+        done
+
+        if [ ${#missing[@]} -eq 0 ]; then
+          exit 0
+        fi
+
+        echo "Installing missing dependencies: ${missing[*]}"
+
+        # apt-get needs root; brew must not run as root. Work out up front whether
+        # we can elevate, so a non-root runner without sudo gets a clear message
+        # instead of a bare permission error from apt-get.
+        SUDO=''
+        CAN_ELEVATE=1
+        if [ "$(id -u)" -ne 0 ]; then
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO='sudo'
+          else
+            CAN_ELEVATE=0
+          fi
+        fi
+
+        if command -v apt-get >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 1 ]; then
+          $SUDO apt-get update
+          $SUDO apt-get install -y "${missing[@]}"
+        elif command -v brew >/dev/null 2>&1; then
+          brew install "${missing[@]}"
+        else
+          if command -v apt-get >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 0 ]; then
+            reason='apt-get is available but this runner is neither root nor has sudo'
+          else
+            reason='no supported package manager (apt-get or brew) was found'
+          fi
+          echo "::error ::Missing required commands (${missing[*]}) and ${reason}. Please pre-install them on this runner."
+          exit 1
+        fi
 
     - name: Trigger Unity Cloud Build
       id: trigger-build
       shell: bash
+      # Inputs are passed through the environment rather than interpolated into
+      # the script, so that values containing shell metacharacters cannot be
+      # executed as code.
       env:
-        AUTH_HEADER: ${{ env.AUTH_HEADER }}
-        ORG_ID: ${{ env.ORG_ID }}
-        PROJ_ID: ${{ env.PROJ_ID }}
-        TARGET_ID: ${{ env.TARGET_ID }}
+        INPUT_AUTHORIZATION_HEADER: ${{ inputs.authorization_header }}
+        INPUT_UNITY_ORG_ID: ${{ inputs.unity_org_id }}
+        INPUT_UNITY_PROJECT_ID: ${{ inputs.unity_project_id }}
+        INPUT_BUILD_TARGET_ID: ${{ inputs.build_target_id }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_CLEAN: ${{ inputs.clean }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_MACHINE_TYPE_LABEL: ${{ inputs.machine_type_label }}
+        INPUT_API_URL: ${{ inputs.api_url }}
       run: |
-        # Determine clean flag as JSON boolean
-        if [ "${{ inputs.clean }}" = "true" ]; then
-          CLEAN_FLAG=true
-        else
-          CLEAN_FLAG=false
+        set -euo pipefail
+
+        # Strip CR/LF (common when secrets are pasted) and surrounding spaces.
+        trim() {
+          printf '%s' "${1:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+        }
+
+        AUTH_HEADER="$(trim "${INPUT_AUTHORIZATION_HEADER:-}")"
+        ORG_ID="$(trim "${INPUT_UNITY_ORG_ID:-}")"
+        PROJ_ID="$(trim "${INPUT_UNITY_PROJECT_ID:-}")"
+        TARGET_ID="$(trim "${INPUT_BUILD_TARGET_ID:-}")"
+        BRANCH="$(trim "${INPUT_BRANCH:-}")"
+        PLATFORM_IN="$(trim "${INPUT_PLATFORM:-}")"
+        MACHINE_TYPE_LABEL="$(trim "${INPUT_MACHINE_TYPE_LABEL:-}")"
+        API_URL="$(trim "${INPUT_API_URL:-}")"
+        API_URL="${API_URL%/}"
+
+        # Keep the credential out of the logs even if it was not passed as a secret.
+        if [ -n "$AUTH_HEADER" ]; then
+          echo "::add-mask::${AUTH_HEADER}"
         fi
 
-        # Prepare JSON payload
-        PAYLOAD=$(jq -n \
-          --arg branch "${{ inputs.branch }}" \
+        # Fail fast on missing required inputs instead of sending a doomed request.
+        for pair in \
+          "unity_org_id:${ORG_ID}" \
+          "unity_project_id:${PROJ_ID}" \
+          "build_target_id:${TARGET_ID}" \
+          "authorization_header:${AUTH_HEADER}" \
+          "api_url:${API_URL}"
+        do
+          name="${pair%%:*}"
+          value="${pair#*:}"
+          if [ -z "$value" ]; then
+            echo "::error ::Input '${name}' is required but was empty."
+            exit 1
+          fi
+        done
+
+        # Accept a bare credential as well as a full header line.
+        case "$AUTH_HEADER" in
+          *:*) ;;
+          *)
+            echo "::warning ::'authorization_header' has no header name; assuming 'Authorization: <value>'."
+            AUTH_HEADER="Authorization: ${AUTH_HEADER}"
+            echo "::add-mask::${AUTH_HEADER}"
+            ;;
+        esac
+
+        case "$(printf '%s' "$INPUT_CLEAN" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+          true|1|yes)   CLEAN_FLAG=true ;;
+          ''|false|0|no) CLEAN_FLAG=false ;;
+          *)
+            echo "::error ::Input 'clean' must be true or false (got '${INPUT_CLEAN}')."
+            exit 1
+            ;;
+        esac
+
+        # Optional fields are omitted entirely so the build target defaults apply.
+        PAYLOAD="$(jq -n -c \
           --argjson clean "$CLEAN_FLAG" \
-          '{ clean: $clean, delay: 0, branch: $branch }')
+          --arg branch "$BRANCH" \
+          --arg platform "$PLATFORM_IN" \
+          --arg machineTypeLabel "$MACHINE_TYPE_LABEL" \
+          '{ clean: $clean, delay: 0 }
+           + (if $branch == "" then {} else { branch: $branch } end)
+           + (if $platform == "" then {} else { platform: $platform } end)
+           + (if $machineTypeLabel == "" then {} else { machineTypeLabel: $machineTypeLabel } end)')"
 
-        # Build URL into a single variable to avoid line-break issues
-        URL="https://build-api.cloud.unity3d.com/api/v1/orgs/${ORG_ID}/projects/${PROJ_ID}/buildtargets/${TARGET_ID}/builds"
+        URL="${API_URL}/orgs/${ORG_ID}/projects/${PROJ_ID}/buildtargets/${TARGET_ID}/builds"
 
-        # Trigger the build
-        RESPONSE_CODE=$(curl -s -w "%{http_code}" -o response.json \
-        -X POST \
-        -H "${AUTH_HEADER}" \
-        -H "Content-Type: application/json" \
-        "$URL" \
-        -d "$PAYLOAD")
+        # Write the response outside the workspace so the caller's checkout stays clean.
+        RESPONSE_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/unity-cloud-build-response.XXXXXX")"
+        trap 'rm -f "$RESPONSE_FILE"' EXIT
 
-        if [[ "$RESPONSE_CODE" =~ ^2 ]]; then
-          echo "response::$(cat response.json)"
-          BUILD_ID=$(jq -r '.[0].build' response.json)
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-          PLATFORM=$(jq -r '.[0].platform' response.json)
-          echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
-          echo "::notice ::Build triggered successfully. ID=$BUILD_ID"
-        else
-          ERROR_MSG=$(jq -r '.error' response.json)
-          echo "::error ::Failed to trigger build: HTTP $RESPONSE_CODE – $ERROR_MSG"
+        echo "Triggering build: target=${TARGET_ID} branch=${BRANCH:-<build target default>} clean=${CLEAN_FLAG}"
+
+        # Triggering a build is NOT idempotent, so never retry a request that the
+        # server may already have acted on. Only DNS (6) and connect (7) failures
+        # are retried: in both cases nothing reached Unity.
+        HTTP_CODE=''
+        CURL_RC=0
+        for attempt in 1 2 3; do
+          set +e
+          HTTP_CODE="$(curl -sS -w '%{http_code}' -o "$RESPONSE_FILE" \
+            -X POST \
+            -H "$AUTH_HEADER" \
+            -H 'Content-Type: application/json' \
+            --connect-timeout 15 \
+            --max-time 120 \
+            --data "$PAYLOAD" \
+            "$URL")"
+          CURL_RC=$?
+          set -e
+
+          if [ "$CURL_RC" -eq 0 ]; then
+            break
+          fi
+          if [ "$CURL_RC" -ne 6 ] && [ "$CURL_RC" -ne 7 ]; then
+            break
+          fi
+          if [ "$attempt" -lt 3 ]; then
+            echo "::warning ::Could not connect to the Unity Cloud Build API (curl exit ${CURL_RC}); retrying (attempt ${attempt}/3)."
+            sleep $((attempt * 2))
+          fi
+        done
+
+        if [ "$CURL_RC" -ne 0 ]; then
+          echo "::error ::Request to the Unity Cloud Build API failed (curl exit ${CURL_RC}). No build was triggered."
           exit 1
         fi
-      # NOTE: you can reference outputs.build_id in the calling workflow
+
+        if [ "${RUNNER_DEBUG:-}" = '1' ]; then
+          echo "::debug ::HTTP ${HTTP_CODE} $(tr -d '\r\n' < "$RESPONSE_FILE")"
+        fi
+
+        # The API returns a single-element array; tolerate a bare object too.
+        FIRST_ENTRY='if type == "array" then (.[0] // {}) else . end'
+
+        if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+          ERROR_MSG="$(jq -r "${FIRST_ENTRY} | (.error // .message // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+          if [ -z "$ERROR_MSG" ]; then
+            # Not JSON (or no message field) — fall back to a truncated raw body.
+            ERROR_MSG="$(head -c 500 "$RESPONSE_FILE" | tr -d '\r\n')"
+          fi
+          echo "::error ::Failed to trigger build: HTTP ${HTTP_CODE} – ${ERROR_MSG:-<empty response>}"
+          exit 1
+        fi
+
+        BUILD_ID="$(jq -r "${FIRST_ENTRY} | (.build // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+        PLATFORM_OUT="$(jq -r "${FIRST_ENTRY} | (.platform // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+
+        if [ -z "$BUILD_ID" ]; then
+          echo "::error ::Unity Cloud Build returned HTTP ${HTTP_CODE} but no build ID: $(head -c 500 "$RESPONSE_FILE" | tr -d '\r\n')"
+          exit 1
+        fi
+
+        {
+          echo "build_id=${BUILD_ID}"
+          echo "platform=${PLATFORM_OUT}"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "### Unity Cloud Build triggered"
+          echo ""
+          echo "| Field | Value |"
+          echo "| --- | --- |"
+          echo "| Build ID | \`${BUILD_ID}\` |"
+          echo "| Build target | \`${TARGET_ID}\` |"
+          echo "| Branch | \`${BRANCH:-<build target default>}\` |"
+          echo "| Platform | \`${PLATFORM_OUT:-unknown}\` |"
+          echo "| Clean | \`${CLEAN_FLAG}\` |"
+        } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+        echo "::notice ::Build triggered successfully. ID=${BUILD_ID}"
