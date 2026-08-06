@@ -190,11 +190,6 @@ machine. The queue state the build was stuck in is then the only clue, which is
 why `wait_for_completion` logs it on every change — `queued (waitingForBuildAgent)`
 and `queued (targetConcurrency)` point at different problems.
 
-When a waited-on build ends up canceled, the action fetches the build's own
-audit log (from the `links.auditlog` URL in the API response, and only if it
-points at the configured API host) and prints its entries — that is where Unity
-records what acted on the build.
-
 What to look at, in order: whether another build was created for the same build
 target while this one waited, whether the organization still has build minutes,
 and whether the requested `machine_type_label` is one the plan can actually
@@ -213,6 +208,10 @@ A second build created while the first was queued means two triggers are racing
 for one build target — the fix below applies. A build that waited alone and was
 killed anyway is a Unity-side capacity or configuration problem, not something
 the workflow can fix; re-run the trigger to see whether it reproduces.
+
+Do not bother with the `links.auditlog` URL that v2 returns inside the build
+object: the endpoint it points at answers `404 Not Found` on v2, so the audit
+log cannot name the canceller either.
 
 `concurrency-timelimit` is the usual answer for release workflows: pushing a tag
 and pushing to the branch often trigger two workflows within seconds of each

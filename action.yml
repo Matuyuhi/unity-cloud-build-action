@@ -409,12 +409,7 @@ runs:
 
         POLL_URL="${URL}/${BUILD_ID}"
         POLL_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/unity-cloud-build-poll.XXXXXX")"
-        AUDIT_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/unity-cloud-build-audit.XXXXXX")"
-        trap 'rm -f "$RESPONSE_FILE" "$POLL_FILE" "$AUDIT_FILE"' EXIT
-
-        # Scheme and host of the configured API, so a link taken from a response
-        # body can never send the credential somewhere else.
-        API_ORIGIN="$(printf '%s' "$API_URL" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')"
+        trap 'rm -f "$RESPONSE_FILE" "$POLL_FILE"' EXIT
 
         DEADLINE=0
         if [ "$TIMEOUT_MINUTES" -gt 0 ]; then
@@ -427,7 +422,6 @@ runs:
         FINAL_STATUS=''
         CANCELED_BY=''
         CHECKOUT_START=''
-        AUDIT_URL=''
         LAST_LOGGED=''
         POLL_ERRORS=0
 
@@ -470,7 +464,6 @@ runs:
                 # checkout timestamp is what separates "died in the queue" from
                 # "died once it was building".
                 CHECKOUT_START="$(jq -r "${FIRST_ENTRY} | (.checkoutStartTime // empty)" "$POLL_FILE" 2>/dev/null || true)"
-                AUDIT_URL="$(jq -r "${FIRST_ENTRY} | (.links.auditlog.href // empty)" "$POLL_FILE" 2>/dev/null || true)"
                 break
                 ;;
               *)
@@ -512,31 +505,6 @@ runs:
         fi
 
         if [ "$FINAL_STATUS" = 'canceled' ]; then
-          # The build's own audit log is the only place that records what acted
-          # on it, and `canceledBy` is frequently null. Best effort: the URL is
-          # whatever the API handed back, and a failure here must not replace
-          # the cancellation message with a plumbing error.
-          case "$AUDIT_URL" in
-            "${API_ORIGIN}"/*)
-              set +e
-              AUDIT_CODE="$(curl -sS -w '%{http_code}' -o "$AUDIT_FILE" \
-                -H "$AUTH_HEADER" \
-                -H 'Accept: application/json' \
-                --connect-timeout 15 \
-                --max-time 60 \
-                "$AUDIT_URL")"
-              AUDIT_RC=$?
-              set -e
-              if [ "$AUDIT_RC" -eq 0 ] && [[ "$AUDIT_CODE" =~ ^2 ]]; then
-                AUDIT_ENTRIES="$(jq -r 'if type == "array" then . else (.results // .auditlog // .entries // [.]) end | .[0:20][] | tostring' "$AUDIT_FILE" 2>/dev/null || true)"
-                if [ -n "$AUDIT_ENTRIES" ]; then
-                  echo "Audit log for build ${BUILD_ID}:"
-                  echo "$AUDIT_ENTRIES"
-                fi
-              fi
-              ;;
-          esac
-
           # `canceledBy` is the only thing that distinguishes "somebody pressed
           # cancel" from the queue, billing and configuration cases, all of
           # which look identical in the dashboard: 0s checkout, no commit.
