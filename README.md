@@ -185,19 +185,29 @@ which this action reports when `wait_for_completion` is enabled:
 | `service`                    | The Build Automation service canceled it.                                      |
 
 `canceled_by` can also be **empty**: Unity leaves `canceledBy` null for some
-cancellations. Combined with a checkout that never started, that means the build
-was superseded — another build was created for the same build target while this
-one waited — or the service stopped it. Listing the target's builds around that
-timestamp shows the culprit:
+cancellations, including builds that are killed while waiting for a build
+machine. The queue state the build was stuck in is then the only clue, which is
+why `wait_for_completion` logs it on every change — `queued (waitingForBuildAgent)`
+and `queued (targetConcurrency)` point at different problems.
+
+What to look at, in order: whether another build was created for the same build
+target while this one waited, whether the organization still has build minutes,
+and whether the requested `machine_type_label` is one the plan can actually
+provide. These endpoints answer the first and show what the build was doing:
 
 ```bash
-curl -sS -u "$KEY_ID:$SECRET_KEY" \
-  "https://build-automation.services.api.unity.com/v2/orgs/$ORG/projects/$PROJECT/buildtargets/$TARGET/builds?per_page=10" \
+BASE="https://build-automation.services.api.unity.com/v2/orgs/$ORG/projects/$PROJECT/buildtargets/$TARGET/builds"
+
+curl -sS -u "$KEY_ID:$SECRET_KEY" "$BASE?per_page=10" \
   | jq '.[] | {build, buildStatus, created, finished, causedBy, canceledBy}'
+curl -sS -u "$KEY_ID:$SECRET_KEY" "$BASE/$BUILD_ID" | jq .
+curl -sS -u "$KEY_ID:$SECRET_KEY" "$BASE/$BUILD_ID/steps" | jq .
 ```
 
 A second build created while the first was queued means two triggers are racing
-for one build target — the same fix as below applies.
+for one build target — the fix below applies. A build that waited alone and was
+killed anyway is a Unity-side capacity or configuration problem, not something
+the workflow can fix; re-run the trigger to see whether it reproduces.
 
 `concurrency-timelimit` is the usual answer for release workflows: pushing a tag
 and pushing to the branch often trigger two workflows within seconds of each

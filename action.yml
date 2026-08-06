@@ -535,7 +535,7 @@ runs:
                 # Observed in practice: canceled, canceledBy null, checkout
                 # never started. Nothing in the request or the repository can
                 # cause this — the build died waiting.
-                WHY='Unity did not attribute it to anyone and the checkout never started, so it was canceled while still queued. Another build created for the same build target usually supersedes a waiting one; compare this build target'"'"'s recent builds for one created while this one waited.'
+                WHY='Unity did not attribute it to anyone and the checkout never started, so it was canceled while waiting for a build machine — nothing in this workflow or the repository can cause that. Check the build in the dashboard, whether the organization has build minutes left, and whether another build was created for the same build target while this one waited. If re-running reproduces it, the machine type or the build capacity of the organization is what to look at.'
               else
                 WHY='Unity did not report a reason.'
               fi
