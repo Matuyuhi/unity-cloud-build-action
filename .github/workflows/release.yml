@@ -1,0 +1,247 @@
+name: Release
+
+# Publishes a new version when a pull request is merged into main: the version
+# is bumped from the latest existing tag, the tag is pushed, the floating
+# `vMAJOR` / `vMAJOR.MINOR` tags are moved, and a GitHub Release is created.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part of the version to bump'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: read
+
+# Two merges landing at once would otherwise race for the same version number.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Bump version and publish release
+    # Closing a pull request without merging it must not release anything.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # On a `closed` pull_request event the default ref is the (now stale)
+          # merge ref, so check out the base branch explicitly. Full history and
+          # tags are needed to work out the current version.
+          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Decide bump level
+        id: bump
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_BUMP: ${{ inputs.bump }}
+          # Untrusted pull request metadata is passed through the environment,
+          # never interpolated into the script.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          rank_of() {
+            case "$1" in
+              major) echo 3 ;;
+              minor) echo 2 ;;
+              patch) echo 1 ;;
+              *)     echo 0 ;;
+            esac
+          }
+
+          rank=0
+          skip=false
+
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+            rank="$(rank_of "${DISPATCH_BUMP:-patch}")"
+          else
+            # Labels win over the title, and the strongest label wins.
+            while IFS= read -r label; do
+              [ -n "$label" ] || continue
+              candidate=0
+              case "$label" in
+                release:skip|no-release|skip-release)
+                  skip=true
+                  ;;
+                release:major|major|breaking|breaking-change)
+                  candidate=3
+                  ;;
+                release:minor|minor|feature|enhancement)
+                  candidate=2
+                  ;;
+                release:patch|patch|fix|bug|bugfix)
+                  candidate=1
+                  ;;
+                *)
+                  candidate=0
+                  ;;
+              esac
+              if [ "$candidate" -gt "$rank" ]; then
+                rank="$candidate"
+              fi
+              # Process substitution keeps the loop in this shell, so `rank`
+              # survives it. `.[]?` yields nothing when there are no labels.
+            done < <(printf '%s' "${PR_LABELS:-[]}" | jq -r '.[]? | ascii_downcase')
+
+            # No label? Fall back to the Conventional Commits prefix in the title.
+            if [ "$rank" -eq 0 ]; then
+              case "$PR_TITLE" in
+                *'!:'*|*'BREAKING CHANGE'*) rank=3 ;;
+                feat:*|feat\(*) rank=2 ;;
+                *) rank=1 ;;
+              esac
+            fi
+
+            case "$PR_TITLE" in
+              *'[skip release]'*|*'[no release]'*) skip=true ;;
+              *) ;;
+            esac
+          fi
+
+          case "$rank" in
+            3) level='major' ;;
+            2) level='minor' ;;
+            *) level='patch' ;;
+          esac
+
+          if [ "$skip" = 'true' ]; then
+            echo "::notice ::Release skipped: the pull request opted out."
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Bump level: ${level}"
+          echo "level=${level}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: version
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          LEVEL: ${{ steps.bump.outputs.level }}
+        run: |
+          set -euo pipefail
+
+          # Highest existing release tag, ignoring anything that is not vX.Y.Z.
+          CURRENT="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1 || true)"
+          CURRENT="${CURRENT:-v0.0.0}"
+
+          IFS='.' read -r major minor patch <<< "${CURRENT#v}"
+
+          case "$LEVEL" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *)
+              echo "::error ::Unknown bump level '${LEVEL}'."
+              exit 1
+              ;;
+          esac
+
+          NEXT="v${major}.${minor}.${patch}"
+
+          if git rev-parse -q --verify "refs/tags/${NEXT}" >/dev/null; then
+            echo "::error ::Tag ${NEXT} already exists."
+            exit 1
+          fi
+
+          echo "${CURRENT} -> ${NEXT} (${LEVEL})"
+          {
+            echo "current=${CURRENT}"
+            echo "next=${NEXT}"
+            echo "major=v${major}"
+            echo "minor=v${major}.${minor}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push tags
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          MAJOR: ${{ steps.version.outputs.major }}
+          MINOR: ${{ steps.version.outputs.minor }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git tag -a "$NEXT" -m "Release ${NEXT}"
+          git push origin "refs/tags/${NEXT}"
+
+          # Floating tags so consumers can pin to `@v0` or `@v0.3`. These move,
+          # so they are force-pushed.
+          for alias in "$MAJOR" "$MINOR"; do
+            git tag -f -a "$alias" -m "Release ${NEXT}"
+            git push -f origin "refs/tags/${alias}"
+          done
+
+      - name: Create GitHub Release
+        id: release
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT: ${{ steps.version.outputs.next }}
+          CURRENT: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+
+          NOTES_ARGS=(--generate-notes)
+          # `--notes-start-tag` fails if the tag does not exist, which is the
+          # case for the very first release.
+          if git rev-parse -q --verify "refs/tags/${CURRENT}" >/dev/null; then
+            NOTES_ARGS+=(--notes-start-tag "$CURRENT")
+          fi
+
+          gh release create "$NEXT" \
+            --title "$NEXT" \
+            --latest \
+            "${NOTES_ARGS[@]}"
+
+          URL="$(gh release view "$NEXT" --json url --jq '.url')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          CURRENT: ${{ steps.version.outputs.current }}
+          LEVEL: ${{ steps.bump.outputs.level }}
+          MAJOR: ${{ steps.version.outputs.major }}
+          MINOR: ${{ steps.version.outputs.minor }}
+          URL: ${{ steps.release.outputs.url }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### Released ${NEXT}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Previous | \`${CURRENT}\` |"
+            echo "| New | \`${NEXT}\` |"
+            echo "| Bump | \`${LEVEL}\` |"
+            echo "| Floating tags | \`${MAJOR}\`, \`${MINOR}\` |"
+            echo "| Release | ${URL} |"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          echo "::notice ::Released ${NEXT} (${LEVEL} bump from ${CURRENT})."
