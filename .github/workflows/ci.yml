@@ -17,13 +17,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install lint dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3-yaml
 
       - name: Validate action.yml and embedded scripts
         run: ./scripts/lint-action.sh
 
+      # Pinned to an exact version so CI stays reproducible and a moving tag
+      # cannot change what runs here.
       - name: Lint workflows with actionlint
-        uses: docker://rhysd/actionlint:latest
+        uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color

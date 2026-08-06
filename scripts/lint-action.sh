@@ -12,7 +12,17 @@ trap 'rm -rf "$WORKDIR"' EXIT
 echo "==> Validating $ACTION_FILE"
 
 python3 - "$ACTION_FILE" "$WORKDIR" <<'PY'
-import sys, os, re, yaml
+import sys, os, re
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    sys.stderr.write(
+        "error: PyYAML is required to lint action.yml but is not installed.\n"
+        "  Debian/Ubuntu: sudo apt-get install -y python3-yaml\n"
+        "  macOS/other:   python3 -m pip install pyyaml\n"
+    )
+    sys.exit(1)
 
 action_file, workdir = sys.argv[1], sys.argv[2]
 

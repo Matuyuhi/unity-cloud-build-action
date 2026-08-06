@@ -76,18 +76,31 @@ runs:
 
         echo "Installing missing dependencies: ${missing[*]}"
 
+        # apt-get needs root; brew must not run as root. Work out up front whether
+        # we can elevate, so a non-root runner without sudo gets a clear message
+        # instead of a bare permission error from apt-get.
         SUDO=''
-        if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
-          SUDO='sudo'
+        CAN_ELEVATE=1
+        if [ "$(id -u)" -ne 0 ]; then
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO='sudo'
+          else
+            CAN_ELEVATE=0
+          fi
         fi
 
-        if command -v apt-get >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 1 ]; then
           $SUDO apt-get update
           $SUDO apt-get install -y "${missing[@]}"
         elif command -v brew >/dev/null 2>&1; then
           brew install "${missing[@]}"
         else
-          echo "::error ::Missing required commands (${missing[*]}) and no supported package manager was found. Please pre-install them on this runner."
+          if command -v apt-get >/dev/null 2>&1 && [ "$CAN_ELEVATE" -eq 0 ]; then
+            reason='apt-get is available but this runner is neither root nor has sudo'
+          else
+            reason='no supported package manager (apt-get or brew) was found'
+          fi
+          echo "::error ::Missing required commands (${missing[*]}) and ${reason}. Please pre-install them on this runner."
           exit 1
         fi
 
