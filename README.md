@@ -171,8 +171,8 @@ it cannot, the step says so instead of retrying until the timeout.
 A build whose wait time equals its total build time, with `Checkout time
 00:00:00`, no last commit and no billable time, never left the queue — it was
 canceled while waiting, so nothing in the repository or the request payload
-caused it. Unity records why in the build's `canceledBy` field, which this
-action reports when `wait_for_completion` is enabled:
+caused it. Unity *sometimes* records why in the build's `canceledBy` field,
+which this action reports when `wait_for_completion` is enabled:
 
 | `canceled_by`                | What happened                                                                 |
 | ---------------------------- | ----------------------------------------------------------------------------- |
@@ -183,6 +183,21 @@ action reports when `wait_for_completion` is enabled:
 | `restart-limit`              | The build was restarted too many times.                                        |
 | `api`                        | Somebody (or something) canceled it from the dashboard or the API.             |
 | `service`                    | The Build Automation service canceled it.                                      |
+
+`canceled_by` can also be **empty**: Unity leaves `canceledBy` null for some
+cancellations. Combined with a checkout that never started, that means the build
+was superseded — another build was created for the same build target while this
+one waited — or the service stopped it. Listing the target's builds around that
+timestamp shows the culprit:
+
+```bash
+curl -sS -u "$KEY_ID:$SECRET_KEY" \
+  "https://build-automation.services.api.unity.com/v2/orgs/$ORG/projects/$PROJECT/buildtargets/$TARGET/builds?per_page=10" \
+  | jq '.[] | {build, buildStatus, created, finished, causedBy, canceledBy}'
+```
+
+A second build created while the first was queued means two triggers are racing
+for one build target — the same fix as below applies.
 
 `concurrency-timelimit` is the usual answer for release workflows: pushing a tag
 and pushing to the branch often trigger two workflows within seconds of each

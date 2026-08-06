@@ -421,6 +421,7 @@ runs:
 
         FINAL_STATUS=''
         CANCELED_BY=''
+        CHECKOUT_START=''
         LAST_LOGGED=''
         POLL_ERRORS=0
 
@@ -459,6 +460,10 @@ runs:
               success|failure|canceled|unknown)
                 FINAL_STATUS="$STATUS"
                 CANCELED_BY="$(jq -r "${FIRST_ENTRY} | (.canceledBy // empty)" "$POLL_FILE" 2>/dev/null || true)"
+                # Unity leaves `canceledBy` null for some cancellations, so the
+                # checkout timestamp is what separates "died in the queue" from
+                # "died once it was building".
+                CHECKOUT_START="$(jq -r "${FIRST_ENTRY} | (.checkoutStartTime // empty)" "$POLL_FILE" 2>/dev/null || true)"
                 break
                 ;;
               *)
@@ -526,7 +531,14 @@ runs:
               WHY='the Build Automation service canceled it.'
               ;;
             '')
-              WHY='Unity did not report a reason.'
+              if [ -z "$CHECKOUT_START" ]; then
+                # Observed in practice: canceled, canceledBy null, checkout
+                # never started. Nothing in the request or the repository can
+                # cause this — the build died waiting.
+                WHY='Unity did not attribute it to anyone and the checkout never started, so it was canceled while still queued. Another build created for the same build target usually supersedes a waiting one; compare this build target'"'"'s recent builds for one created while this one waited.'
+              else
+                WHY='Unity did not report a reason.'
+              fi
               ;;
             *)
               WHY="Unity reported '${CANCELED_BY}'."
