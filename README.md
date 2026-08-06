@@ -124,6 +124,43 @@ The response parser accepts both a single-element array (`[{ "build": 123, ... }
 - **Required inputs are validated before the request** — an empty org/project/target ID or an invalid `clean` value fails immediately instead of producing a confusing API error.
 - **`curl` and `jq`** are used, and are preinstalled on GitHub-hosted runners. On runners that lack them, the action installs them via `apt-get` or `brew`, and fails with a clear message if neither is available.
 
+## Versioning and releases
+
+Releases are cut automatically: when a pull request is merged into `main`, the
+`Release` workflow bumps the version from the latest tag, pushes the new tag and
+publishes a GitHub Release with generated notes.
+
+Three tags are published for every release, so you can choose how much movement
+you accept:
+
+| Tag form  | Example  | Moves                                            |
+| --------- | -------- | ------------------------------------------------ |
+| `vX.Y.Z`  | `v0.3.1` | Never — pin here for fully reproducible workflows |
+| `vX.Y`    | `v0.3`   | On each patch release                            |
+| `vX`      | `v0`     | On each minor and patch release                  |
+
+While the action is on `0.x`, a minor bump may contain breaking changes, so `v0`
+is the loosest possible pin. Prefer `vX.Y.Z` or `vX.Y`.
+
+### Choosing the bump level
+
+The level is taken from the merged pull request, in this order:
+
+1. **Labels** (strongest wins): `release:major` / `major` / `breaking` /
+   `breaking-change` → major; `release:minor` / `minor` / `feature` /
+   `enhancement` → minor; `release:patch` / `patch` / `fix` / `bug` / `bugfix` →
+   patch.
+2. **The pull request title**, read as a [Conventional
+   Commit](https://www.conventionalcommits.org/): `feat!:` or `BREAKING CHANGE`
+   → major, `feat:` → minor.
+3. **Patch**, as the default.
+
+To merge without releasing, add a `release:skip` / `no-release` /
+`skip-release` label, or put `[skip release]` in the pull request title.
+
+A release can also be cut by hand from the Actions tab — run the `Release`
+workflow via **Run workflow** and pick the bump level.
+
 ## Development
 
 Validate `action.yml` and the shell scripts embedded in it:
