@@ -48,6 +48,28 @@ inputs:
       default applies.
     required: false
     default: ''
+  wait_for_completion:
+    description: >-
+      Poll the build until it reaches a terminal state, and fail the step unless
+      it succeeded. Off by default, in which case the action returns as soon as
+      the build is queued — so a build Unity later cancels (for example because
+      it waited too long behind another build) leaves the workflow green.
+    required: false
+    default: 'false'
+  poll_interval_seconds:
+    description: >-
+      How often to poll the build status while waiting. Values below 5 are
+      raised to 5 so the API is not hammered. Ignored unless
+      `wait_for_completion` is enabled.
+    required: false
+    default: '30'
+  timeout_minutes:
+    description: >-
+      Stop waiting after this many minutes and fail the step; the Unity build
+      itself keeps running. `0` waits indefinitely (the job timeout still
+      applies). Ignored unless `wait_for_completion` is enabled.
+    required: false
+    default: '90'
   api_url:
     description: >-
       Base URL of the Unity Build Automation API, including the version segment.
@@ -66,6 +88,23 @@ outputs:
       The status the build was created with, as reported by the API (e.g.
       queued). Empty if the API did not report one.
     value: '${{ steps.trigger-build.outputs.build_status }}'
+  queued_reason:
+    description: >-
+      Why the build is waiting, as reported by the API (e.g. targetConcurrency,
+      waitingForBuildAgent). Empty if the API did not report one.
+    value: '${{ steps.trigger-build.outputs.queued_reason }}'
+  final_build_status:
+    description: >-
+      The terminal status of the build (success, failure, canceled, unknown).
+      Only set when `wait_for_completion` is enabled and the build finished
+      before the timeout.
+    value: '${{ steps.trigger-build.outputs.final_build_status }}'
+  canceled_by:
+    description: >-
+      Who or what canceled the build (e.g. concurrency-timelimit,
+      billing-invalidsubscription, api). Only set when the build was canceled
+      while `wait_for_completion` was enabled.
+    value: '${{ steps.trigger-build.outputs.canceled_by }}'
 runs:
   using: 'composite'
   steps:
@@ -129,6 +168,9 @@ runs:
         INPUT_CLEAN: ${{ inputs.clean }}
         INPUT_PLATFORM: ${{ inputs.platform }}
         INPUT_MACHINE_TYPE_LABEL: ${{ inputs.machine_type_label }}
+        INPUT_WAIT_FOR_COMPLETION: ${{ inputs.wait_for_completion }}
+        INPUT_POLL_INTERVAL_SECONDS: ${{ inputs.poll_interval_seconds }}
+        INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         INPUT_API_URL: ${{ inputs.api_url }}
       run: |
         set -euo pipefail
@@ -136,6 +178,37 @@ runs:
         # Strip CR/LF (common when secrets are pasted) and surrounding spaces.
         trim() {
           printf '%s' "${1:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+        }
+
+        # These set a global rather than echoing, because a `$(…)` subshell
+        # cannot fail the step: its `exit` would only leave the subshell.
+        PARSED_BOOL=''
+        parse_bool() {
+          case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+            true|1|yes)    PARSED_BOOL=true ;;
+            ''|false|0|no) PARSED_BOOL=false ;;
+            *)
+              echo "::error ::Input '${1}' must be true or false (got '${2}')."
+              exit 1
+              ;;
+          esac
+        }
+
+        PARSED_UINT=0
+        parse_uint() {
+          local raw
+          raw="$(trim "${2:-}")"
+          case "$raw" in
+            ''|*[!0-9]*)
+              echo "::error ::Input '${1}' must be a non-negative integer (got '${2}')."
+              exit 1
+              ;;
+          esac
+          # 10# keeps a leading zero from being read as octal.
+          PARSED_UINT=$((10#$raw))
+          if [ "$PARSED_UINT" -lt "${3:-0}" ]; then
+            PARSED_UINT="${3:-0}"
+          fi
         }
 
         KEY_ID="$(trim "${INPUT_KEY_ID:-}")"
@@ -187,14 +260,19 @@ runs:
             ;;
         esac
 
-        case "$(printf '%s' "$INPUT_CLEAN" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
-          true|1|yes)   CLEAN_FLAG=true ;;
-          ''|false|0|no) CLEAN_FLAG=false ;;
-          *)
-            echo "::error ::Input 'clean' must be true or false (got '${INPUT_CLEAN}')."
-            exit 1
-            ;;
-        esac
+        parse_bool 'clean' "${INPUT_CLEAN:-}"
+        CLEAN_FLAG="$PARSED_BOOL"
+
+        parse_bool 'wait_for_completion' "${INPUT_WAIT_FOR_COMPLETION:-}"
+        WAIT_FLAG="$PARSED_BOOL"
+
+        # Polling settings only matter while waiting, but validate them either
+        # way so a typo is caught on the first run rather than the first wait.
+        parse_uint 'poll_interval_seconds' "${INPUT_POLL_INTERVAL_SECONDS:-30}" 5
+        POLL_INTERVAL="$PARSED_UINT"
+
+        parse_uint 'timeout_minutes' "${INPUT_TIMEOUT_MINUTES:-90}" 0
+        TIMEOUT_MINUTES="$PARSED_UINT"
 
         # Optional fields are omitted entirely so the build target defaults apply.
         PAYLOAD="$(jq -n -c \
@@ -282,6 +360,7 @@ runs:
         BUILD_ID="$(jq -r "${FIRST_ENTRY} | (.build // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
         PLATFORM_OUT="$(jq -r "${FIRST_ENTRY} | (.platform // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
         BUILD_STATUS="$(jq -r "${FIRST_ENTRY} | (.buildStatus // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
+        QUEUED_REASON="$(jq -r "${FIRST_ENTRY} | (.queuedReason // empty)" "$RESPONSE_FILE" 2>/dev/null || true)"
 
         if [ -z "$BUILD_ID" ]; then
           # A 2xx can still carry a per-target 'error' — e.g. a build for this
@@ -299,6 +378,7 @@ runs:
           echo "build_id=${BUILD_ID}"
           echo "platform=${PLATFORM_OUT}"
           echo "build_status=${BUILD_STATUS}"
+          echo "queued_reason=${QUEUED_REASON}"
         } >> "$GITHUB_OUTPUT"
 
         {
@@ -315,3 +395,153 @@ runs:
         } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
         echo "::notice ::Build triggered successfully. ID=${BUILD_ID}"
+
+        if [ "$WAIT_FLAG" != 'true' ]; then
+          # Unity can still cancel this build while it sits in the queue, and
+          # this step has already reported success by then, so say so once.
+          echo "Not waiting for the build to finish (wait_for_completion is false); its outcome will not affect this job."
+          exit 0
+        fi
+
+        # ---------------------------------------------------------------------
+        # Wait for the build to reach a terminal state.
+        # ---------------------------------------------------------------------
+
+        POLL_URL="${URL}/${BUILD_ID}"
+        POLL_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/unity-cloud-build-poll.XXXXXX")"
+        trap 'rm -f "$RESPONSE_FILE" "$POLL_FILE"' EXIT
+
+        DEADLINE=0
+        if [ "$TIMEOUT_MINUTES" -gt 0 ]; then
+          DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+          echo "Waiting for build ${BUILD_ID} (polling every ${POLL_INTERVAL}s, giving up after ${TIMEOUT_MINUTES}m)."
+        else
+          echo "Waiting for build ${BUILD_ID} (polling every ${POLL_INTERVAL}s, no timeout)."
+        fi
+
+        FINAL_STATUS=''
+        CANCELED_BY=''
+        LAST_LOGGED=''
+        POLL_ERRORS=0
+
+        # `unknown` is terminal too: Unity uses it for builds it has lost track
+        # of, so waiting for it to change would hang until the timeout.
+        while :; do
+          set +e
+          POLL_CODE="$(curl -sS -w '%{http_code}' -o "$POLL_FILE" \
+            -H "$AUTH_HEADER" \
+            -H 'Accept: application/json' \
+            --connect-timeout 15 \
+            --max-time 60 \
+            "$POLL_URL")"
+          POLL_RC=$?
+          set -e
+
+          if [ "$POLL_RC" -ne 0 ] || [[ ! "$POLL_CODE" =~ ^2 ]]; then
+            if [ "$POLL_CODE" = '401' ] || [ "$POLL_CODE" = '403' ]; then
+              # Credentials that could trigger a build but cannot read it back
+              # will not start working on the next poll.
+              echo "::error ::Build ${BUILD_ID} was triggered, but reading its status returned HTTP ${POLL_CODE}. Give the service account a role that can read builds, or turn off 'wait_for_completion'."
+              exit 1
+            fi
+            POLL_ERRORS=$((POLL_ERRORS + 1))
+            if [ "$POLL_ERRORS" -ge 5 ]; then
+              echo "::error ::Could not read the status of build ${BUILD_ID} after ${POLL_ERRORS} attempts (last: curl exit ${POLL_RC}, HTTP ${POLL_CODE}). The build itself is unaffected and may still be running."
+              exit 1
+            fi
+            echo "::warning ::Could not read build status (curl exit ${POLL_RC}, HTTP ${POLL_CODE}); retrying (${POLL_ERRORS}/5)."
+          else
+            POLL_ERRORS=0
+            STATUS="$(jq -r "${FIRST_ENTRY} | (.buildStatus // empty)" "$POLL_FILE" 2>/dev/null || true)"
+            QUEUED_REASON="$(jq -r "${FIRST_ENTRY} | (.queuedReason // empty)" "$POLL_FILE" 2>/dev/null || true)"
+
+            case "$STATUS" in
+              success|failure|canceled|unknown)
+                FINAL_STATUS="$STATUS"
+                CANCELED_BY="$(jq -r "${FIRST_ENTRY} | (.canceledBy // empty)" "$POLL_FILE" 2>/dev/null || true)"
+                break
+                ;;
+              *)
+                PROGRESS="${STATUS:-unknown}"
+                if [ -n "$QUEUED_REASON" ]; then
+                  PROGRESS="${PROGRESS} (${QUEUED_REASON})"
+                fi
+                if [ "$PROGRESS" != "$LAST_LOGGED" ]; then
+                  echo "Build ${BUILD_ID}: ${PROGRESS}"
+                  LAST_LOGGED="$PROGRESS"
+                fi
+                ;;
+            esac
+          fi
+
+          if [ "$DEADLINE" -ne 0 ] && [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            echo "final_build_status=" >> "$GITHUB_OUTPUT"
+            echo "canceled_by=" >> "$GITHUB_OUTPUT"
+            echo "::error ::Gave up waiting for build ${BUILD_ID} after ${TIMEOUT_MINUTES} minutes (last known status: ${LAST_LOGGED:-unknown}). The build has NOT been canceled and may still finish; raise 'timeout_minutes' if this is normal for this target."
+            exit 1
+          fi
+
+          sleep "$POLL_INTERVAL"
+        done
+
+        {
+          echo "final_build_status=${FINAL_STATUS}"
+          echo "canceled_by=${CANCELED_BY}"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo ""
+          echo "| Final status | \`${FINAL_STATUS}\` |"
+        } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+        if [ "$FINAL_STATUS" = 'success' ]; then
+          echo "::notice ::Build ${BUILD_ID} finished successfully."
+          exit 0
+        fi
+
+        if [ "$FINAL_STATUS" = 'canceled' ]; then
+          # `canceledBy` is the only thing that distinguishes "somebody pressed
+          # cancel" from the queue, billing and configuration cases, all of
+          # which look identical in the dashboard: 0s checkout, no commit.
+          case "$CANCELED_BY" in
+            concurrency-timelimit)
+              WHY='it waited in the queue longer than Unity allows while another build held the concurrency slot. Stagger the triggers (a tag push and a branch push often fire together), raise the concurrent build limit, or re-run this job.'
+              ;;
+            billing-invalidsubscription)
+              WHY='the organization has no valid Build Automation subscription, or it is out of build minutes.'
+              ;;
+            service-badconfiguration)
+              WHY='Unity rejected the build target configuration.'
+              ;;
+            service-timelimit|jenkins-timelimit|evaluation-timelimit)
+              WHY="it exceeded a Unity-side time limit (${CANCELED_BY})."
+              ;;
+            restart-limit)
+              WHY='it was restarted too many times.'
+              ;;
+            api)
+              WHY='it was canceled from the dashboard or through the API.'
+              ;;
+            service)
+              WHY='the Build Automation service canceled it.'
+              ;;
+            '')
+              WHY='Unity did not report a reason.'
+              ;;
+            *)
+              WHY="Unity reported '${CANCELED_BY}'."
+              ;;
+          esac
+          echo "::error ::Build ${BUILD_ID} was canceled: ${WHY}"
+          exit 1
+        fi
+
+        # A failed build usually carries per-stage details; surface the first few
+        # so the log says what broke without a trip to the dashboard.
+        FAILURES="$(jq -r "${FIRST_ENTRY} | [(.failureDetails // [])[] | \"  - \" + ((.stage // \"?\") | tostring) + \": \" + ((.publicMessage // .label // \"\") | tostring)] | .[0:5] | join(\"\n\")" "$POLL_FILE" 2>/dev/null || true)"
+        if [ -n "$FAILURES" ]; then
+          echo "Reported failures:"
+          echo "$FAILURES"
+        fi
+        echo "::error ::Build ${BUILD_ID} finished with status '${FINAL_STATUS}'."
+        exit 1
