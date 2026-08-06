@@ -391,6 +391,11 @@ runs:
           echo "| Branch | \`${BRANCH:-<build target default>}\` |"
           echo "| Platform | \`${PLATFORM_OUT:-unknown}\` |"
           echo "| Status | \`${BUILD_STATUS:-unknown}\` |"
+          if [ -n "$QUEUED_REASON" ]; then
+            # Worth surfacing even without waiting: it says whether the build is
+            # merely waiting its turn or waiting for a machine to exist.
+            echo "| Queue reason | \`${QUEUED_REASON}\` |"
+          fi
           echo "| Clean | \`${CLEAN_FLAG}\` |"
         } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
