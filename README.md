@@ -2,7 +2,7 @@
 
 ## Overview
 
-A reusable GitHub Action that triggers a [Unity Build Automation](https://docs.unity.com/en-us/build-automation) (formerly Unity Cloud Build) build for a build target, optionally on a specific branch. It returns the build ID on success.
+A reusable GitHub Action that triggers a [Unity Build Automation](https://docs.unity.com/en-us/build-automation) (formerly Unity Cloud Build) build for a build target — or for a whole [build target group](#building-a-build-target-group) — optionally on a specific branch. It returns the build ID on success.
 
 The action does not check out or read your repository — it only calls the Unity Build Automation REST API — so it is safe to run before, after, or without `actions/checkout`.
 
@@ -24,7 +24,8 @@ Pass them as `unity_service_account_key_id` and `unity_service_account_secret_ke
 | ---------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `unity_org_id`                     | Yes      | The Unity Organization ID (used in the endpoint `orgs/{unity_org_id}`).                                                                         | —                                                        |
 | `unity_project_id`                 | Yes      | The Unity Build Automation Project ID.                                                                                                          | —                                                        |
-| `build_target_id`                  | Yes      | The Build Target ID within the Unity Build Automation project.                                                                                  | —                                                        |
+| `build_target_id`                  | See note | The Build Target ID within the Unity Build Automation project. `_all` builds every build target in the project.                                  | `''`                                                     |
+| `build_target_group_id`            | See note | ID (or name) of a [build target group](#building-a-build-target-group) to build.                                                                | `''`                                                     |
 | `unity_service_account_key_id`     | Yes      | Key ID of a Unity service account with a Build Automation role.                                                                                 | —                                                        |
 | `unity_service_account_secret_key` | Yes      | Secret key of that service account. Pass as a secret.                                                                                            | —                                                        |
 | `branch`                           | No       | Git branch to build. When empty, the branch configured on the build target is used.                                                             | `''`                                                     |
@@ -36,18 +37,27 @@ Pass them as `unity_service_account_key_id` and `unity_service_account_secret_ke
 | `timeout_minutes`                  | No       | Give up waiting after this many minutes and fail the step; `0` waits indefinitely. The Unity build is never canceled by this action.             | `90`                                                     |
 | `api_url`                          | No       | Base URL of the API, including the version segment. v2 only — a v1 base URL is rejected.                                                         | `https://build-automation.services.api.unity.com/v2`     |
 
+**Note:** exactly one of `build_target_id` and `build_target_group_id` is required. Setting both fails immediately, as does setting neither.
+
 `platform` and `machine_type_label` are omitted from the request when left empty, so the build target's own configuration applies. Set them only if you want to override the target.
 
 ## Outputs
 
-| Output               | Description                                                              |
-| -------------------- | ------------------------------------------------------------------------ |
-| `build_id`           | The ID (build number) of the triggered Unity build.                      |
-| `platform`           | The platform of the triggered build, as reported by the API.             |
-| `build_status`       | The status the build was created with (e.g. `queued`). Empty if the API did not report one. |
-| `queued_reason`      | Why the build is waiting, if the API says so (e.g. `targetConcurrency`, `waitingForBuildAgent`). |
-| `final_build_status` | Terminal status (`success`, `failure`, `canceled`, `unknown`). Only set when `wait_for_completion` is enabled and the build finished before the timeout. |
-| `canceled_by`        | Who or what canceled the build (e.g. `concurrency-timelimit`). Only set when a waited-on build was canceled. |
+| Output                  | Description                                                              |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `build_id`              | The ID (build number) of the triggered Unity build. Empty when more than one build was triggered. |
+| `platform`              | The platform of the triggered build, as reported by the API. Empty when more than one build was triggered. |
+| `build_status`          | The status the build was created with (e.g. `queued`). Empty if the API did not report one, or when more than one build was triggered. |
+| `queued_reason`         | Why the build is waiting, if the API says so (e.g. `targetConcurrency`, `waitingForBuildAgent`). Empty when more than one build was triggered. |
+| `builds`                | Every triggered build, as a compact JSON array of `{buildTargetId, build, platform, buildStatus, queuedReason}`. Always set, including for a single build. |
+| `build_count`           | How many builds were triggered.                                          |
+| `group_build_id`        | The group build ID shared by every build of a group — the same ID the dashboard links them under. Only set with `build_target_group_id`. |
+| `build_target_group_id` | The resolved ID of the group that was built. Useful when the group was given by name. Only set with `build_target_group_id`. |
+| `final_build_status`    | Terminal status (`success`, `failure`, `canceled`, `unknown`). With several builds it is `success` only when every build succeeded, and otherwise the status of the first build that did not. Only set when `wait_for_completion` is enabled and the builds finished before the timeout. |
+| `canceled_by`           | Who or what canceled the build (e.g. `concurrency-timelimit`). Only set when a waited-on build was canceled; with several builds it refers to the same build as `final_build_status`. |
+| `final_builds`          | The terminal state of every build, as a compact JSON array of `{buildTargetId, build, finalStatus, canceledBy}`. Only set when `wait_for_completion` is enabled and the builds finished before the timeout. |
+
+The single-build outputs (`build_id`, `platform`, `build_status`, `queued_reason`) are set whenever exactly one build was triggered — including a group that contains exactly one enabled build target. With more than one build there is nothing a singular output could name, so they are left empty and `builds` carries everything.
 
 ## Usage
 
@@ -125,6 +135,68 @@ jobs:
           echo "Status: ${{ steps.unity.outputs.build_status }}"
 ```
 
+## Building a build target group
+
+A [build target group](https://docs.unity.com/en-us/build-automation/basic-build-configuration/organize-build-configurations-using-groups)
+collects related build targets — a Windows, a macOS and an Android target that
+make up one release, say — so they can be built together. Pass
+`build_target_group_id` instead of `build_target_id` and the action builds every
+build target in the group:
+
+```yaml
+      - name: Build the whole release group
+        id: unity
+        uses: Matuyuhi/unity-cloud-build-action@{version}
+        with:
+          unity_org_id: ${{ secrets.UNITY_ORG_ID }}
+          unity_project_id: ${{ secrets.UNITY_PROJECT_ID }}
+          build_target_group_id: Release   # the group's name or its ID
+          unity_service_account_key_id: ${{ secrets.UNITY_SA_KEY_ID }}
+          unity_service_account_secret_key: ${{ secrets.UNITY_SA_SECRET_KEY }}
+          branch: main
+          wait_for_completion: true
+
+      - name: Report every build
+        if: always()
+        run: |
+          echo '${{ steps.unity.outputs.builds }}' | jq -r '.[] | "\(.buildTargetId): #\(.build)"'
+          echo "group build: ${{ steps.unity.outputs.group_build_id }}"
+```
+
+The API has no "build this group" endpoint — the dashboard starts one build per
+build target and ties them together with a shared `groupBuildId`, and this action
+does exactly the same. So each target gets its own POST carrying
+`buildTargetGroupIds` and a `groupBuildId` that the action generates, which is
+what makes the builds show up as one group build in **Build History**.
+
+What follows from that:
+
+- **The group is resolved by ID or by name.** The action lists the project's
+  groups and matches the ID first, then the exact name, then the name
+  case-insensitively. A name that matches several groups is an error naming the
+  candidate IDs; an unknown one prints the groups that do exist. Deleted groups
+  are never matched. The resolved ID is exposed as `build_target_group_id`.
+- **Build targets disabled inside the group are skipped**, and the log says
+  which. A group whose targets are all disabled is an error rather than a
+  silently empty run. A group that is itself disabled is still built — that flag
+  only stops Unity building it on its own — with a warning.
+- **The builds are independent once started.** They queue, run and finish
+  separately; `wait_for_completion` waits for all of them and fails the step
+  unless every one succeeded. Each build's status changes are logged with its
+  target name, and per-target results land in `final_builds`.
+- **A target that will not start does not stop the others.** If Unity refuses
+  one target — most often because a build for it is already running — the
+  action still triggers the rest, reports the refusal, and fails the step
+  without waiting, because the run cannot come out green anyway. The builds that
+  did start are in `builds` and keep running in Unity.
+- **Group builds multiply build minutes.** A group of four targets is four
+  builds against your Build Automation quota, and `wait_for_completion` keeps
+  the runner idle until the slowest of them finishes.
+
+To build every target in the project rather than one group, pass
+`build_target_id: _all`; the response fans out the same way, and `builds` lists
+one entry per target Unity started.
+
 ## Waiting for the build to finish
 
 By default the action returns as soon as Unity has accepted the build, and the
@@ -154,6 +226,9 @@ state and fail the job unless it succeeded:
           echo "final: ${{ steps.unity.outputs.final_build_status }}"
           echo "canceled by: ${{ steps.unity.outputs.canceled_by }}"
 ```
+
+With a build target group, this waits for every build in the group and fails the
+step unless all of them succeeded.
 
 While waiting, each status change is logged — including the queue reason, so a
 build stuck behind another one reads as `queued (targetConcurrency)` in the job
@@ -235,7 +310,7 @@ Unity deprecated Build Automation API v1 and **removes it on 2026-12-21**. This 
 | Success status | `200`/`201` | `202 Accepted` |
 | Error body | `{ "error": … }` | [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) `{ "detail": …, "requestId": … }` |
 
-The endpoint path (`/orgs/{org}/projects/{project}/buildtargets/{target}/builds`) and the request fields this action sends (`clean`, `delay`, `branch`, `platform`, `machineTypeLabel`) are unchanged.
+The endpoint path (`/orgs/{org}/projects/{project}/buildtargets/{target}/builds`) and the request fields this action sends (`clean`, `delay`, `branch`, `platform`, `machineTypeLabel`, plus `buildTargetGroupIds` and `groupBuildId` for a [group build](#building-a-build-target-group)) are unchanged.
 
 ### What you need to change
 
@@ -261,8 +336,9 @@ Reference: [Build Automation API v2](https://docs.unity.com/en-us/oas-build-auto
 - **Fire-and-forget by default.** Without `wait_for_completion`, the step succeeds once the build is queued and says so in the log; what the build does afterwards cannot affect the job. Status polling (`GET`) *is* safe to retry, so transient errors are retried up to 5 consecutive times before the wait is abandoned.
 - **Secrets stay in one step.** Credentials are passed to a single step's environment and masked in the logs — the secret key, the base64 credential derived from it, and the assembled header are all masked. Nothing is written to `$GITHUB_ENV`, so they do not leak into other steps of the calling job.
 - **The response body is not logged** by default. Re-run the workflow with debug logging enabled to see it.
-- **Required inputs are validated before the request** — an empty org/project/target ID, a missing credential, or an invalid `clean` value fails immediately instead of producing a confusing API error.
-- **A 2xx without a build ID is still a failure.** v2 can return `202` carrying only an `error` — typically because a build is already running for that target. The action reports the API's own explanation instead of an empty `build_id`. The parser accepts both the documented single-element array and a bare object.
+- **Required inputs are validated before the request** — an empty org/project ID, a missing credential, an invalid `clean` value, or naming both (or neither) of `build_target_id` and `build_target_group_id` fails immediately instead of producing a confusing API error.
+- **A 2xx without a build ID is still a failure.** v2 can return `202` carrying only an `error` — typically because a build is already running for that target. The action reports the API's own explanation instead of an empty `build_id`. The parser accepts a bare object, the documented single-element array, and the multi-element array that `_all` returns.
+- **Listing build target groups is retried, triggering is not.** Resolving `build_target_group_id` is a `GET`, so it retries up to 3 times on transient failures; credential and not-found errors are reported straight away rather than retried.
 - **`curl` and `jq`** are used, and are preinstalled on GitHub-hosted runners. On runners that lack them, the action installs them via `apt-get` or `brew`, and fails with a clear message if neither is available. `base64` (from coreutils) is also required and is present on any runner that has a shell.
 
 ## Versioning and releases
