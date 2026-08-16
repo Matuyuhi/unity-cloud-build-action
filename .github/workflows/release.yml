@@ -36,7 +36,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # On a `closed` pull_request event the default ref is the (now stale)
           # merge ref, so check out the base branch explicitly. Full history and
